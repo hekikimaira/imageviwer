@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>ImageViewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body { 
+    width: 100%; height: 100%; overflow: hidden; 
+    background: #0a0a0a; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    touch-action: none;
+  }
+
+  /* ── Select Screen ── */
+  #selectScreen {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 20px;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  #selectScreen .icon {
+    width: 64px; height: 64px; opacity: 0.3;
+  }
+  #selectBtn {
+    background: #fff; color: #0a0a0a;
+    border: none; border-radius: 12px;
+    padding: 16px 32px; font-size: 17px; font-weight: 600;
+    cursor: pointer; transition: opacity 0.2s;
+  }
+  #selectBtn:active { opacity: 0.7; }
+  #fileCount {
+    font-size: 13px; color: #666; height: 20px;
+  }
+
+  /* ── Thumbnail Grid ── */
+  #gridScreen {
+    display: none; flex-direction: column; height: 100%;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #gridHeader {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; flex-shrink: 0;
+  }
+  #gridHeader .title {
+    font-size: 17px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex: 1; margin-right: 12px;
+  }
+  #changeBtn {
+    background: rgba(255,255,255,0.12); color: #fff;
+    border: none; border-radius: 8px;
+    padding: 8px 14px; font-size: 13px; font-weight: 500;
+    cursor: pointer; flex-shrink: 0;
+  }
+  #changeBtn:active { opacity: 0.7; }
+  #grid {
+    flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px;
+    padding: 0 2px 2px;
+  }
+  .thumb {
+    aspect-ratio: 1; overflow: hidden; cursor: pointer;
+    background: #1a1a1a;
+  }
+  .thumb img {
+    width: 100%; height: 100%; object-fit: cover;
+    transition: opacity 0.2s;
+  }
+  .thumb:active img { opacity: 0.7; }
+
+  /* ── Viewer ── */
+  #viewer {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: #000;
+  }
+  #viewerCounter {
+    position: fixed; top: env(safe-area-inset-top, 0px); left: 0; right: 0;
+    text-align: center; padding: 12px;
+    font-size: 13px; color: rgba(255,255,255,0.5);
+    z-index: 101; pointer-events: none;
+    transition: opacity 0.3s;
+  }
+  #slideContainer {
+    width: 100%; height: 100%;
+    display: flex; will-change: transform;
+  }
+  .slide {
+    width: 100%; height: 100%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .slide img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    will-change: transform;
+    transform-origin: 0 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- Select Screen -->
+<div id="selectScreen">
+  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <rect x="3" y="3" width="18" height="18" rx="3"/>
+    <circle cx="8.5" cy="8.5" r="1.5"/>
+    <path d="M21 15l-5-5L5 21"/>
+  </svg>
+  <button id="selectBtn">フォルダを選択</button>
+  <div id="fileCount"></div>
+  <input type="file" id="folderInput" webkitdirectory multiple hidden>
+</div>
+
+<!-- Grid Screen -->
+<div id="gridScreen">
+  <div id="gridHeader">
+    <div class="title" id="folderName"></div>
+    <button id="changeBtn">変更</button>
+  </div>
+  <div id="grid"></div>
+</div>
+
+<!-- Viewer -->
+<div id="viewer">
+  <div id="viewerCounter"></div>
+  <div id="slideContainer"></div>
+</div>
+
+<script>
+(() => {
+  // ── State ──
+  let images = [];       // { name, url, file }
+  let currentIdx = 0;
+  let counterTimer = null;
+
+  // ── Elements ──
+  const selectScreen = document.getElementById('selectScreen');
+  const gridScreen = document.getElementById('gridScreen');
+  const viewer = document.getElementById('viewer');
+  const folderInput = document.getElementById('folderInput');
+  const selectBtn = document.getElementById('selectBtn');
+  const changeBtn = document.getElementById('changeBtn');
+  const fileCount = document.getElementById('fileCount');
+  const folderName = document.getElementById('folderName');
+  const grid = document.getElementById('grid');
+  const slideContainer = document.getElementById('slideContainer');
+  const viewerCounter = document.getElementById('viewerCounter');
+
+  // ── Folder Selection ──
+  selectBtn.addEventListener('click', () => folderInput.click());
+  changeBtn.addEventListener('click', () => folderInput.click());
+
+  folderInput.addEventListener('change', (e) => {
+    const files = Array.from(e.target.files);
+    const imgFiles = files
+      .filter(f => /\.(jpe?g|png|gif|webp|bmp|heic|heif|avif|tiff?)$/i.test(f.name))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
+
+    if (imgFiles.length === 0) {
+      fileCount.textContent = '画像ファイルが見つかりません';
+      return;
+    }
+
+    // Revoke old URLs
+    images.forEach(img => URL.revokeObjectURL(img.url));
+
+    images = imgFiles.map(f => ({
+      name: f.name,
+      url: URL.createObjectURL(f),
+      file: f
+    }));
+
+    // Extract folder name
+    const path = imgFiles[0].webkitRelativePath || '';
+    const folder = path.split('/')[0] || 'Images';
+    folderName.textContent = `${folder} (${images.length})`;
+
+    showGrid();
+  });
+
+  function showGrid() {
+    selectScreen.style.display = 'none';
+    viewer.style.display = 'none';
+    gridScreen.style.display = 'flex';
+    renderGrid();
+  }
+
+  function renderGrid() {
+    grid.innerHTML = '';
+    images.forEach((img, i) => {
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      const imgEl = document.createElement('img');
+      imgEl.loading = 'lazy';
+      imgEl.src = img.url;
+      imgEl.alt = img.name;
+      div.appendChild(imgEl);
+      div.addEventListener('click', () => openViewer(i));
+      grid.appendChild(div);
+    });
+  }
+
+  // ── Viewer ──
+  function openViewer(idx) {
+    currentIdx = idx;
+    gridScreen.style.display = 'none';
+    viewer.style.display = 'block';
+    buildSlides();
+    showCounter();
+  }
+
+  function closeViewer() {
+    viewer.style.display = 'none';
+    gridScreen.style.display = 'flex';
+    resetZoom();
+    slideContainer.innerHTML = '';
+  }
+
+  function buildSlides() {
+    slideContainer.innerHTML = '';
+    // Build 3 slides: prev, current, next
+    for (let offset = -1; offset <= 1; offset++) {
+      const i = currentIdx + offset;
+      const slide = document.createElement('div');
+      slide.className = 'slide';
+      if (i >= 0 && i < images.length) {
+        const img = document.createElement('img');
+        img.src = images[i].url;
+        img.draggable = false;
+        slide.appendChild(img);
+      }
+      slideContainer.appendChild(slide);
+    }
+    slideContainer.style.transition = 'none';
+    slideContainer.style.transform = `translateX(-${window.innerWidth}px)`;
+    updateCounter();
+  }
+
+  function showCounter() {
+    viewerCounter.style.opacity = '1';
+    clearTimeout(counterTimer);
+    counterTimer = setTimeout(() => {
+      viewerCounter.style.opacity = '0';
+    }, 2000);
+  }
+
+  function updateCounter() {
+    viewerCounter.textContent = `${currentIdx + 1} / ${images.length}`;
+  }
+
+  function slideTo(newIdx) {
+    if (newIdx < 0 || newIdx >= images.length) return false;
+    const dir = newIdx > currentIdx ? 1 : -1;
+    const w = window.innerWidth;
+    slideContainer.style.transition = 'transform 0.28s cubic-bezier(0.25, 0.1, 0.25, 1)';
+    slideContainer.style.transform = `translateX(${-w - dir * w}px)`;
+    
+    setTimeout(() => {
+      currentIdx = newIdx;
+      buildSlides();
+      showCounter();
+    }, 290);
+    return true;
+  }
+
+  // ── Touch Handling ──
+  let touchState = null;
+  let scale = 1, translateX = 0, translateY = 0;
+  let baseScale = 1, baseX = 0, baseY = 0;
+
+  function getCurrentImg() {
+    const slides = slideContainer.querySelectorAll('.slide');
+    if (slides[1]) return slides[1].querySelector('img');
+    return null;
+  }
+
+  function resetZoom() {
+    scale = 1; translateX = 0; translateY = 0;
+    const img = getCurrentImg();
+    if (img) img.style.transform = '';
+  }
+
+  function applyTransform() {
+    const img = getCurrentImg();
+    if (img) {
+      img.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+    }
+  }
+
+  viewer.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      touchState = {
+        type: 'single',
+        startX: t.clientX,
+        startY: t.clientY,
+        lastX: t.clientX,
+        lastY: t.clientY,
+        startTime: Date.now(),
+        moved: false,
+        dismissed: false,
+        swiping: null // 'h' | 'v' | null
+      };
+      baseX = translateX;
+      baseY = translateY;
+    } else if (e.touches.length === 2) {
+      e.preventDefault();
+      const t1 = e.touches[0], t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const cx = (t1.clientX + t2.clientX) / 2;
+      const cy = (t1.clientY + t2.clientY) / 2;
+      touchState = {
+        type: 'pinch',
+        initDist: dist,
+        centerX: cx,
+        centerY: cy
+      };
+      baseScale = scale;
+      baseX = translateX;
+      baseY = translateY;
+    }
+  }, { passive: false });
+
+  viewer.addEventListener('touchmove', (e) => {
+    if (!touchState) return;
+
+    if (touchState.type === 'single' && e.touches.length === 1) {
+      const t = e.touches[0];
+      const dx = t.clientX - touchState.startX;
+      const dy = t.clientY - touchState.startY;
+
+      if (!touchState.moved && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+        touchState.moved = true;
+        // Determine swipe direction
+        if (scale <= 1) {
+          touchState.swiping = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+        } else {
+          touchState.swiping = 'pan';
+        }
+      }
+
+      if (!touchState.moved) return;
+      e.preventDefault();
+
+      if (touchState.swiping === 'h' && scale <= 1) {
+        // Horizontal slide swipe
+        slideContainer.style.transition = 'none';
+        slideContainer.style.transform = `translateX(${-window.innerWidth + dx}px)`;
+      } else if (touchState.swiping === 'v' && scale <= 1) {
+        // Vertical dismiss swipe (only down)
+        if (dy > 0) {
+          viewer.style.background = `rgba(0,0,0,${Math.max(0, 1 - dy / 400)})`;
+          const img = getCurrentImg();
+          if (img) {
+            img.style.transform = `translateY(${dy}px) scale(${Math.max(0.85, 1 - dy / 800)})`;
+          }
+        }
+      } else if (touchState.swiping === 'pan' && scale > 1) {
+        // Pan while zoomed
+        const panDx = t.clientX - touchState.lastX;
+        const panDy = t.clientY - touchState.lastY;
+        translateX += panDx;
+        translateY += panDy;
+        applyTransform();
+        touchState.lastX = t.clientX;
+        touchState.lastY = t.clientY;
+      }
+
+    } else if (touchState.type === 'pinch' && e.touches.length === 2) {
+      e.preventDefault();
+      const t1 = e.touches[0], t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const newScale = Math.max(1, Math.min(5, baseScale * (dist / touchState.initDist)));
+      
+      // Zoom toward pinch center
+      const cx = (t1.clientX + t2.clientX) / 2;
+      const cy = (t1.clientY + t2.clientY) / 2;
+      
+      if (newScale !== scale) {
+        const ratio = newScale / scale;
+        translateX = cx - ratio * (cx - translateX);
+        translateY = cy - ratio * (cy - translateY);
+        scale = newScale;
+        applyTransform();
+      }
+    }
+  }, { passive: false });
+
+  viewer.addEventListener('touchend', (e) => {
+    if (!touchState) return;
+
+    if (touchState.type === 'single') {
+      const dx = (e.changedTouches[0]?.clientX || 0) - touchState.startX;
+      const dy = (e.changedTouches[0]?.clientY || 0) - touchState.startY;
+
+      if (touchState.swiping === 'h' && scale <= 1) {
+        const threshold = window.innerWidth * 0.25;
+        if (dx < -threshold && currentIdx < images.length - 1) {
+          slideTo(currentIdx + 1);
+        } else if (dx > threshold && currentIdx > 0) {
+          slideTo(currentIdx - 1);
+        } else {
+          // Snap back
+          slideContainer.style.transition = 'transform 0.28s cubic-bezier(0.25, 0.1, 0.25, 1)';
+          slideContainer.style.transform = `translateX(-${window.innerWidth}px)`;
+        }
+      } else if (touchState.swiping === 'v' && scale <= 1 && dy > 120) {
+        // Dismiss
+        closeViewer();
+        viewer.style.background = '#000';
+      } else if (touchState.swiping === 'v') {
+        // Snap back
+        viewer.style.background = '#000';
+        const img = getCurrentImg();
+        if (img) img.style.transform = '';
+      }
+
+      // Tap (no move) → show counter
+      if (!touchState.moved) {
+        showCounter();
+      }
+    }
+
+    if (touchState.type === 'pinch') {
+      // Snap to 1 if close
+      if (scale < 1.05) {
+        scale = 1; translateX = 0; translateY = 0;
+        const img = getCurrentImg();
+        if (img) {
+          img.style.transition = 'transform 0.2s';
+          img.style.transform = '';
+          setTimeout(() => { if (img) img.style.transition = ''; }, 200);
+        }
+      }
+    }
+
+    touchState = null;
+  });
+
+  // Prevent default zoom on iOS
+  document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+  document.addEventListener('gesturechange', e => e.preventDefault(), { passive: false });
+  document.addEventListener('gestureend', e => e.preventDefault(), { passive: false });
+
+})();
+</script>
+</body>
+</html>
